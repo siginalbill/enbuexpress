@@ -1,0 +1,234 @@
+/**
+*2017.1.30 DHT11 data save with mongodb
+*2017.10.17 update with vs
+*Gcc example:
+*	gcc -o test_17_10_17 DHT11_test1.c  -lwiringPi -I/usr/local/include/libmongoc-1.0 -I/usr/local/include/libbson-1.0/ -lmongoc-1.0 -lbson-1.0
+**/
+#include <wiringPi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#include <bson.h>  
+#include <bcon.h>  
+#include <mongoc.h>  
+
+#include <unistd.h>
+
+#include <sys/types.h>
+#include <dirent.h>
+#include <string.h>
+
+typedef unsigned char uint8;
+typedef unsigned int uint16;
+typedef unsigned long uint32;
+
+#define HIGH_TIME 32  //32
+#define BUF_SIZE 1024
+
+time_t tm;
+int pinNumber = 0; //use gpio to read data
+uint32 databuf;
+char *ptr;
+
+uint8 readSensorData(void);
+
+double shiftData (int a, double b);
+
+int main (void)
+{
+  /**
+   *	DB init
+  **/
+   mongoc_client_t      *client;  
+   mongoc_database_t    *database;  
+   mongoc_collection_t  *collection;  
+   bson_t               *command,  
+                         reply;  
+   bson_error_t          error;  
+   char                 *str;  
+   bool                  retval;  
+
+   bson_t 				*b_json; 
+   time_t				lt;
+
+   /** 
+    * Required to initialize libmongoc's internals 
+   **/  
+   mongoc_init ();//初始化libmongoc驱动  
+   /* 
+    * Create a new client instance 
+    */  
+   client = mongoc_client_new ("mongodb://localhost:27017/DHT11");//创建连接对象  
+   /* 
+    * Get a handle on the database "db_name" and collection "coll_name" 
+    */  
+   database = mongoc_client_get_database (client, "DHT11");//获取数据库  
+   collection = mongoc_client_get_collection (client, "DHT11", "test");//获取指定数据库和集合  
+   /* 
+    * Do work. This example pings the database, prints the result as JSON and 
+    * performs an insert 
+    */  
+   command = BCON_NEW ("ping", BCON_INT32 (1));  
+   retval = mongoc_client_command_simple (client, "pi", command, NULL, &reply, &error);//执行命令  
+   if (!retval) {  
+      fprintf (stderr, "%s\n", error.message);  
+      return EXIT_FAILURE;  
+   }  
+   str = bson_as_json (&reply, NULL);  
+   printf ("%s\n", str);  
+ 
+	/**
+	*	Read GPIO7
+	**/
+
+	printf("Use GPIO%d to read data!\n", pinNumber);
+
+	if (-1 == wiringPiSetup()) {
+		printf("Setup wiringPi failed!");
+		return 1;
+	}
+
+	pinMode(pinNumber, OUTPUT); // set mode to output
+	digitalWrite(pinNumber, 1); // output a high level
+	printf("Enter OS-------\n");
+	/**
+	 *	Main
+	**/	
+	while(1) {
+		//printf(">>>>One more1!\n");
+		pinMode(pinNumber,OUTPUT); // set mode to output
+		//printf(">>>>One more2!\n");
+		digitalWrite(pinNumber, 1); // output a high level
+		//printf(">>>>One more3!\n");
+		if(readSensorData())
+		{
+			//printf(">>>>time\n.");
+			lt = time(&tm);
+			ptr = ctime(&tm);
+			printf("-%s",ptr);
+			printf("RH:%d.%d\n",(databuf>>24)&0xff,(databuf>>16)&0xff);
+			printf("TMP:%d.%d\n",(databuf>>8)&0xff,databuf&0xff);
+	//
+	//Data insert
+	//
+		 
+			//	b_json = bson_new ();  
+			//	printf(">>>>bson\n.");
+			bson_init(b_json);
+    		bson_append_double(b_json,"Time",-1,(lt));  
+    		bson_append_double(b_json, "RH",-1,shiftData(((databuf>>24)&0xff),((double)((databuf>>16)&0xff)))); 
+			bson_append_double(b_json, "TMP",-1,shiftData(((databuf>>8)&0xff),((double)(databuf&0xff)))); 
+			
+		//插入文档 
+			//printf(">>>>insert\n.");
+			if (!mongoc_collection_insert (collection, MONGOC_INSERT_NONE,b_json, NULL, &error))
+			{  
+     			 fprintf (stderr, "%s\n", error.message);  
+   			}  
+			//printf(">>>>bson destory\n.");
+			databuf=0;
+			bson_destroy (b_json);
+			//delay(3000);	 //	decrease cpu expend.
+			//printf(">>>>wait for one more!\n");
+			sleep(3);
+			
+		}
+		else
+		{
+			printf("Sorry! Sensor doesnt ans, try again.\n");
+			continue;
+
+		}
+	}
+	//
+	//End Main
+	//
+	databuf = 0;
+	//
+	//DB Destory
+	//
+
+	bson_destroy(&reply);
+	bson_destroy(command);
+	bson_free(str);
+	/*
+	* Release our handles and clean up libmongoc
+	*/
+	mongoc_collection_destroy(collection);//释放表对象  
+	mongoc_database_destroy(database);//释放数据库对象  
+	mongoc_client_destroy(client);//释放连接对象  
+	mongoc_cleanup();//释放libmongoc驱动  
+	return 0;
+}
+
+uint8 readSensorData(void)
+{
+	uint8 crc;
+	uint8 i;
+
+	pinMode(pinNumber,OUTPUT); // set mode to output
+	digitalWrite(pinNumber, 0); // output a high level
+	//usleep(28); 
+	delay(28);
+	//printf(">>>test fun: delay(28)\n");
+	digitalWrite(pinNumber, 1); // output a low level
+	pinMode(pinNumber, INPUT); // set mode to input
+	pullUpDnControl(pinNumber,PUD_UP);
+
+	//nanosleep();	
+	delayMicroseconds(26); // 27
+	//printf(">>>test fun: delayMicroseconds(27);\n");
+	if(digitalRead(pinNumber)==0) //SENSOR ANS
+	{
+		while(!digitalRead(pinNumber)); //wait to high
+		//	printf(">>>test fun: while(!digitalRead(pinNumber))\n");
+		for(i=0;i<32;i++)
+		{
+			//printf("1");
+			//printf("1");
+			while(digitalRead(pinNumber)); //data clock start
+			//printf("0");
+			while(!digitalRead(pinNumber)); //data start
+			
+			//nanosleep(HIGH_TIME);	
+			delayMicroseconds(HIGH_TIME);
+			databuf*=2;
+			if(digitalRead(pinNumber)==1) //1
+			{
+				databuf++;
+			}
+		}
+
+		for(i=0;i<8;i++)
+		{
+			while(digitalRead(pinNumber)); //data clock start
+			//printf("1");
+			while(!digitalRead(pinNumber)); //data start
+			//printf("0");
+			//nanosleep(HIGH_TIME);	
+			delayMicroseconds(HIGH_TIME);
+			crc*=2;
+			if(digitalRead(pinNumber)==1) //1
+			{
+				crc++;
+			}
+		}
+		return 1;
+	}
+	else
+	{
+		fprintf(stderr,"Something err!\n");
+		//readSensorData();
+		return 0;
+	}
+}
+
+double shiftData (int a,double b){
+	while(b >= 1){
+		b=b/10;
+	}
+
+	return (double)(a+b);
+}
+
